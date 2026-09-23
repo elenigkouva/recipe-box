@@ -278,11 +278,25 @@
 <body>
 <div id="app"><div class="loading-screen">Setting the table…</div></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <script>
 (function(){
   "use strict";
 
   var STORE_KEY = "recipebox-data-v1";
+
+  var firebaseConfig = {
+    apiKey: "AIzaSyCtz1euJSMtTdP5CF8Asdf5mnofRt98bJA",
+    authDomain: "recipe-box-d0796.firebaseapp.com",
+    projectId: "recipe-box-d0796",
+    storageBucket: "recipe-box-d0796.firebasestorage.app",
+    messagingSenderId: "320374688778",
+    appId: "1:320374688778:web:f826f54c1b9d3efdf663f3"
+  };
+  var fbAuth = null, fbDb = null, fbAvailable = false;
+  var currentUser = null;
 
   var DEFAULT_TARGETS = {
     calories:2000, protein:50, carbs:275, fat:70, fiber:28,
@@ -325,7 +339,7 @@
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
   function num(v){ var n = parseFloat(v); return isNaN(n) ? 0 : n; }
 
-  // ---------- storage (this browser only, via localStorage) ----------
+  // ---------- storage (local browser + optional cloud sync) ----------
   var storageWorks = true;
 
   function save(){
@@ -335,11 +349,22 @@
       storageWorks = true;
     }catch(e){
       console.error("save failed", e);
-      if(storageWorks){ // only warn once per session
+      if(storageWorks){
         toast("Couldn't save to this browser. Use Export backup so you don't lose your work.");
       }
       storageWorks = false;
     }
+    if(fbAvailable && currentUser){
+      pushToCloud(payload);
+    }
+  }
+
+  function pushToCloud(payload){
+    payload = payload || { groups: state.groups, recipes: state.recipes, log: state.log };
+    fbDb.collection("users").doc(currentUser.uid).set(payload).catch(function(e){
+      console.error("cloud save failed", e);
+      toast("Couldn't sync to the cloud — check your connection.");
+    });
   }
 
   function load(){
@@ -358,6 +383,51 @@
       seedDefaults();
     }
     finishLoad();
+  }
+
+  // ---------- cloud sync (Firebase Auth + Firestore) ----------
+  function initFirebase(){
+    try{
+      if(typeof firebase === "undefined"){ fbAvailable = false; return; }
+      firebase.initializeApp(firebaseConfig);
+      fbAuth = firebase.auth();
+      fbDb = firebase.firestore();
+      fbAvailable = true;
+      fbAuth.onAuthStateChanged(handleAuthChange);
+    }catch(e){
+      console.error("firebase init failed", e);
+      fbAvailable = false;
+    }
+  }
+
+  function handleAuthChange(user){
+    var wasSignedIn = !!currentUser;
+    currentUser = user;
+    if(user){
+      fbDb.collection("users").doc(user.uid).get().then(function(doc){
+        if(doc.exists){
+          var data = doc.data();
+          state.groups = data.groups || [];
+          state.recipes = data.recipes || [];
+          state.log = data.log || {};
+          state.activeGroup = state.groups.length ? state.groups[0].id : null;
+          state.selectedRecipes = [];
+          try{ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }catch(e){}
+          toast("Synced from the cloud.");
+        } else {
+          pushToCloud();
+          toast("Signed in — this browser's recipes are now backed up to the cloud.");
+        }
+        render();
+      }).catch(function(e){
+        console.error("cloud load failed", e);
+        toast("Could not reach the cloud — using local data for now.");
+        render();
+      });
+    } else if(wasSignedIn){
+      load();
+      toast("Signed out — back to local-only storage.");
+    }
   }
 
   // ---------- backup: export / import as a .json file ----------
@@ -487,7 +557,7 @@
           '<p><strong>3. Pick what to make.</strong> Click one or more recipe cards to select them yourself, or hit "🎲 Choose for me" to pick one at random from the group.</p>' +
           '<p><strong>4. Get your recipe + shopping list.</strong> Hit "Generate" and you\'ll see the full recipe(s) plus one combined shopping list — if you picked several recipes that share ingredients, the quantities are added together automatically.</p>' +
           '<p><strong>5. Track your week.</strong> Log any recipe you actually cooked to a day in the "Weekly nutrition" section at the bottom, and watch the bars fill in against general daily targets.</p>' +
-          '<p style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink-soft);font-size:0.86rem;"><strong style="color:var(--ink);">About your data:</strong> everything is saved only in this browser, on this device — nothing is sent anywhere. Use the <strong>Export backup</strong> button any time to save a copy of your recipes as a file, and <strong>Import backup</strong> to load one back in (handy for moving to a new browser or device).</p>' +
+          '<p style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink-soft);font-size:0.86rem;"><strong style="color:var(--ink);">About your data:</strong> sign in with Google (top right) to sync your recipes to the cloud and pick up where you left off on any device. If you skip signing in, everything stays only in this browser — use <strong>Export backup</strong> any time to save a copy as a file, just in case.</p>' +
         '</div>' +
         '<div class="modal-actions" style="justify-content:flex-end;">' +
           '<button class="btn primary ui" id="closeHelpBtn">Got it</button>' +
@@ -577,6 +647,8 @@
     html += '</div>';
     html += '</header>';
 
+    html += renderAuthBar();
+
     html += '<div class="layout">';
     html += renderSidebar();
     html += '<main>' + renderMain() + '</main>';
@@ -591,6 +663,21 @@
 
     app.innerHTML = html;
     attachHandlers();
+  }
+
+  function renderAuthBar(){
+    var h = '<div class="ui" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin:-16px 0 20px;font-size:0.82rem;color:var(--ink-soft);flex-wrap:wrap;">';
+    if(!fbAvailable){
+      h += '<span>Cloud sync unavailable right now — saving to this browser only.</span>';
+    } else if(currentUser){
+      h += '<span>☁️ Synced as '+esc(currentUser.displayName || currentUser.email)+'</span>';
+      h += '<button class="btn small ghost ui" id="signOutBtn">Sign out</button>';
+    } else {
+      h += '<span>Saving to this browser only.</span>';
+      h += '<button class="btn small primary ui" id="signInBtn">Sign in with Google to sync</button>';
+    }
+    h += '</div>';
+    return h;
   }
 
   function renderSidebar(){
@@ -608,7 +695,7 @@
     h += '<div class="add-group-row"><input type="text" id="newGroupName" placeholder="New group name" /><button class="btn small" id="addGroupBtn">Add</button></div>';
     h += '<div class="sidebar-note">Groups are just categories — like "Weeknight Dinners" or "Meal Prep". Add recipes inside a group, then generate a plan from one or several at once.</div>';
     h += '<div class="sidebar-note">';
-    h += '<strong style="font-weight:600;color:var(--ink);">Your data</strong><br/>Saved only in this browser — it won\'t follow you to another device or browser. Export a backup file regularly so you never lose it.';
+    h += '<strong style="font-weight:600;color:var(--ink);">Your data</strong><br/>Sign in above to sync your recipes to the cloud and access them from any device. If you skip signing in, everything stays only in this browser — export a backup regularly just in case.';
     h += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">';
     h += '<button class="btn small ui" id="exportBtn">⬇ Export backup</button>';
     h += '<button class="btn small ghost ui" id="importBtn">⬆ Import backup</button>';
@@ -945,6 +1032,17 @@
     var helpBtn = document.getElementById('helpBtn');
     if(helpBtn) helpBtn.onclick = function(){ openHelpModal(false); };
 
+    var signInBtn = document.getElementById('signInBtn');
+    if(signInBtn) signInBtn.onclick = function(){
+      var provider = new firebase.auth.GoogleAuthProvider();
+      fbAuth.signInWithPopup(provider).catch(function(e){
+        console.error(e);
+        toast("Sign-in didn't go through — try again.");
+      });
+    };
+    var signOutBtn = document.getElementById('signOutBtn');
+    if(signOutBtn) signOutBtn.onclick = function(){ fbAuth.signOut(); };
+
     app.querySelectorAll('[data-edit]').forEach(function(el){
       el.addEventListener('click', function(e){ e.stopPropagation(); openRecipeModal(el.getAttribute('data-edit')); });
     });
@@ -1026,6 +1124,7 @@
   }
 
   initDownloads();
+  initFirebase();
   load();
 })();
 </script>
